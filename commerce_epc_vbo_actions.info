@@ -4,6 +4,7 @@ core = 7.x
 dependencies[] = commerce_order
 dependencies[] = commerce_order_ui
 dependencies[] = entity
+dependencies[] = views_bulk_operations
 
 package = Epectasys
 
