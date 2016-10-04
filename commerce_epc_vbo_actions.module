@@ -1,0 +1,166 @@
+<?php
+/**
+ * Implements hook_action_info().
+ */
+function commerce_epc_vbo_actions_action_info() {
+	return array(
+		'_commerce_epc_vbo_actions_combine_orders_action' => array( // declare the function name to be used. 
+			'type' => 'entity', // can be node, comment etc
+			'label' => t('Cumulate products from multiple orders'), // the name of the operation which is displayed to the user.
+			'configurable' => false,
+			//'pass rows' => true, // this will ensure that the entire views row is passed as part of the context in your action callback.
+			'aggregate' => true,
+		),
+	);
+}
+
+/**
+ * Defines the action behavior
+ */
+function _commerce_epc_vbo_actions_combine_orders_action($entity, $context = array()) { 
+	
+	global $user;
+	
+	$statuses = array('rezervat',); // order statuses on which we can perform updates
+	
+	$orders_ids = array_keys($entity);
+	$min_order_id = min($orders_ids);
+	$main_order = $entity[$min_order_id]; // main order is the order with lowest order_id	
+	
+	// it only works if the main order has the status "reserved"
+	if (!in_array($main_order->status, $statuses)) {
+		drupal_set_message('Comanda principală: order_id: ' . $main_order->order_id . ', order_name: ' . $main_order->order_number . ' are statusul "' .  $main_order->status . '" și nu poate fi modificată.', 'error');
+		return;
+	}
+	
+	// get main order info
+	$main_product_ids = $main_product_lines = array();	
+	foreach($main_order->commerce_line_items['und'] as $line) {
+		$line_item = commerce_line_item_load($line['line_item_id']);
+		
+		if ($line_item->type == 'product') {
+			$main_product_ids[] = $line_item->commerce_product['und'][0]['product_id'];
+			$main_product_lines[$line_item->commerce_product['und'][0]['product_id']] = $line_item;
+		}
+	}
+	
+	$has_changes = false;
+	$cumulated_orders_ids = array();
+	foreach ($entity as $id => $order) {
+		
+		// cumulate only orders that aren't onlready cummulated
+		if ($order->status == 'cumulata') {
+			drupal_set_message('Ai încercat cumularea comenzii ' . $id . ', care are deja statusul: Anulată (cumulată).', 'error');
+			break;
+		}		
+		// cumulate only orders which belong to the same user
+		if ($order->uid != $main_order->uid) {
+			drupal_set_message('Se pot cumula doar comenzile ce aparțin aceluiași utilizator.', 'error');
+			break;
+		}
+		
+		// we have an order to be cumulated
+		if ($id != $min_order_id && 
+			isset($order->commerce_line_items['und'])) {
+			
+			if (!in_array($order->status, $statuses)) {
+				drupal_set_message('Comanda principală: order_id: ' . $main_order->order_id . ', order_name: ' . $main_order->order_number . ' are statusul "' .  $main_order->status . '" și nu poate fi modificată.', 'error');
+				return;
+			}
+			
+			// reload main order if the order is already changed
+			if ($has_changes) { 
+				$main_order = commerce_order_load($min_order_id);				
+				foreach($main_order->commerce_line_items['und'] as $line) {
+					$line_item = commerce_line_item_load($line['line_item_id']);
+					
+					if ($line_item->type == 'product') {
+						$main_product_ids[] = $line_item->commerce_product['und'][0]['product_id'];
+						$main_product_lines[$line_item->commerce_product['und'][0]['product_id']] = $line_item;
+					}
+				}
+			}
+		
+			foreach($order->commerce_line_items['und'] as $line) {
+				
+				$line_item = commerce_line_item_load($line['line_item_id']);
+				
+				// go to next line item, we cumultate only line items of type product, skip discounts, delivery etc.
+				if ($line_item->type != 'product') {
+					// order contains discount, display a notification
+					if ($line_item->type == 'commerce_discount') {
+						drupal_set_message('Atenție, comanda ' . $order->order_id . ' conține discount, ce trebuie adăugat manual la comanda principală (' . $main_order->order_id . ').', 'warning');
+					}
+					continue;
+				}
+					
+				$product_id = $line_item->commerce_product['und'][0]['product_id'];
+				if(!in_array($product_id, $main_product_ids)) {
+					
+					// creeaza un nou line item, eventual sterge-l pe cel din comanda ce va fi anulata/cumulata la principala
+					$product = commerce_product_load($product_id);
+					$new_line_item = commerce_product_line_item_new($product, $line_item->quantity, $main_order->order_id, array());
+					commerce_line_item_save($new_line_item);
+					
+					$main_order->commerce_line_items['und'][]['line_item_id'] = $new_line_item->line_item_id;
+					
+					$has_changes = true;
+				}
+				else {
+					
+					$main_product_line = $main_product_lines[$product_id];						
+					$main_product_line->quantity += $line_item->quantity;
+					commerce_line_item_save($main_product_line);
+					
+					$has_changes = true;
+										
+				} // if(!in_array($product_id, $main_product_ids)) {
+				
+				commerce_order_save($main_order);
+				
+			} // foreach($order->commerce_line_items['und'] as $line)
+			
+			if($has_changes) {
+				// commerce_order_save($main_order);
+				commerce_order_status_update($order, 'cumulata');
+				
+				$message = message_create('commerce_order_admin_comment', array('uid' => $user->uid));
+				$wrapper = entity_metadata_wrapper('message', $message);
+				$wrapper->message_commerce_order->set($order);
+				$wrapper->message_commerce_body->value->set('Produsele din comanda curentă (' . $order->order_id . ') au fost adăugate(cumulate) la comanda ' . $min_order_id . '.');
+				$wrapper->save();
+							
+				$cumulated_orders_ids[] = $id;
+			}
+			
+		} // if ($id != $min_order_id && isset($order->commerce_line_items['und']))
+	}// foreach ($entity as $id => $order)
+	
+	// setting messages on the main order
+	if (!empty($cumulated_orders_ids)) {
+		
+		// we calculate price per product depending on quantity, so recalculate sell price to override price with "price table" (price_table module)
+		foreach($main_order->commerce_line_items['und'] as $line) {
+			$line_item = commerce_line_item_load($line['line_item_id']);
+			if ($line_item->type == 'product') {
+				// recalculate sell price to override price with price table
+				rules_invoke_event('commerce_product_calculate_sell_price', $line_item);	
+				commerce_line_item_save($line_item);
+			}
+		}
+	
+		$message = message_create('commerce_order_admin_comment', array('uid' => $user->uid));
+		$wrapper = entity_metadata_wrapper('message', $message);
+		$wrapper->message_commerce_order->set($main_order);
+				
+		if(count($cumulated_orders_ids) > 1)
+			$message = 'Produsele din comenzile ' . implode(', ', $cumulated_orders_ids) . ' au fost adăugate la comanda curentă (' . $min_order_id . ').';
+		else
+			$message = 'Produsele din comanda ' . implode(', ', $cumulated_orders_ids) . ' au fost adăugate la comanda curentă (' . $min_order_id . ').';
+			
+		drupal_set_message($message);
+		$wrapper->message_commerce_body->value->set($message);
+		$wrapper->save();
+	}
+	
+}

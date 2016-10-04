@@ -1,0 +1,15 @@
+name = Commerce Epectasys Views Bulk Operations Actions
+description = Module used to implement VBO custom actions, like combining products from multiple commerce orders into one main order.
+core = 7.x
+dependencies[] = commerce_order
+dependencies[] = commerce_order_ui
+dependencies[] = entity
+
+package = Epectasys
+
+; Information added by Drupal.org packaging script on 2014-03-12
+version = "7.x-1.0"
+core = "7.x"
+project = "commerce_epc_vbo_actions"
+datestamp = "1394635851"
+
